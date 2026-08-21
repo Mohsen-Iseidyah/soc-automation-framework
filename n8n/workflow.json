@@ -1,0 +1,1498 @@
+{
+  "name": "for my redeem",
+  "nodes": [
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4190098e-5091-4a19-9383-d35167d8150d",
+              "leftValue": "={{$json.rule_level}}",
+              "rightValue": 12,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        432,
+        384
+      ],
+      "id": "0b39388e-81c1-4287-ad14-c2641d6eb760",
+      "name": "High Severity Without IOC"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wazuh-alert",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -48,
+        0
+      ],
+      "id": "2e147ec2-4be4-4002-9277-54d73ae0c2ad",
+      "name": "Receive Wazuh Alert",
+      "webhookId": "1f2bef1b-dccd-471f-96cc-c487ef1a0522"
+    },
+    {
+      "parameters": {
+        "jsCode": "const root = $json;\nconst alert = root.body?.body ?? root.body ?? root;\n\nfunction pushIOC(list, type, value, source) {\n  if (!value) return;\n  if (typeof value !== \"string\") value = String(value);\n  value = value.trim();\n  if (!value) return;\n\n  const exists = list.some(i => i.type === type && i.value === value);\n  if (!exists) list.push({ type, value, source });\n}\n\nfunction mapSeverity(level) {\n  level = Number(level || 0);\n  if (level >= 13) return \"critical\";\n  if (level >= 10) return \"high\";\n  if (level >= 6) return \"medium\";\n  return \"low\";\n}\n\nfunction isIPv4(value) {\n  if (!value || typeof value !== \"string\") return false;\n  const ip = value.trim();\n  if (!/^(?:\\d{1,3}\\.){3}\\d{1,3}$/.test(ip)) return false;\n\n  const parts = ip.split(\".\").map(Number);\n  return parts.every(n => n >= 0 && n <= 255);\n}\n\nfunction isPrivateOrLocalIP(ip) {\n  if (!ip || typeof ip !== \"string\") return true;\n  ip = ip.trim();\n\n  return (\n    ip === \"127.0.0.1\" ||\n    ip === \"::1\" ||\n    ip === \"0.0.0.0\" ||\n    ip.startsWith(\"10.\") ||\n    ip.startsWith(\"192.168.\") ||\n    /^172\\.(1[6-9]|2[0-9]|3[0-1])\\./.test(ip) ||\n    ip.startsWith(\"169.254.\")\n  );\n}\n\nfunction normalizeDomain(value) {\n  if (!value || typeof value !== \"string\") return null;\n  const v = value.trim().toLowerCase().replace(/\\.$/, \"\");\n  return v || null;\n}\n\nfunction cleanUrl(url) {\n  return String(url).trim().replace(/[),.;]+$/, \"\");\n}\n\nfunction getHostFromUrl(url) {\n  if (!url || typeof url !== \"string\") return null;\n\n  const cleaned = url.trim();\n\n  try {\n    const host = new URL(cleaned).hostname;\n    if (host) return host.trim().toLowerCase();\n  } catch {}\n\n  const m = cleaned.match(/^https?:\\/\\/([^\\/:\\s]+)(?::\\d{1,5})?(?:\\/|$)/i);\n  if (m && m[1]) {\n    return m[1].trim().toLowerCase();\n  }\n\n  return null;\n}\n\nfunction pushDerivedHostIOC(list, host, source) {\n  if (!host) return;\n\n  if (isIPv4(host)) {\n    if (!isPrivateOrLocalIP(host)) {\n      pushIOC(list, \"ip\", host, source);\n    }\n  } else {\n    const d = normalizeDomain(host);\n    if (d) {\n      pushIOC(list, \"domain\", d, source);\n    }\n  }\n}\n\nfunction extractDomainsFromText(text, excludedHosts = []) {\n  if (!text || typeof text !== \"string\") return [];\n\n  const matches = text.match(/\\b(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}\\b/g) || [];\n  const excludedTlds = new Set([\n    \"exe\", \"dll\", \"sys\", \"bat\", \"cmd\", \"ps1\", \"msi\", \"lnk\", \"tmp\", \"dat\", \"log\",\n    \"vbs\", \"vbe\", \"ini\", \"txt\", \"json\", \"xml\", \"csv\", \"js\", \"html\", \"css\", \"py\",\n    \"webclient\"\n  ]);\n  const excluded = new Set(excludedHosts.map(v => String(v).toLowerCase()));\n\n  return [...new Set(matches\n    .map(m => normalizeDomain(m))\n    .filter(Boolean)\n    .filter(d => {\n      const last = d.split(\".\").pop();\n      if (excludedTlds.has(last)) return false;\n      if (excluded.has(d)) return false;\n      return true;\n    })\n  )];\n}\n\nfunction extractIPsFromText(text) {\n  if (!text || typeof text !== \"string\") return [];\n\n  const matches = text.match(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g) || [];\n  return [...new Set(matches.filter(isIPv4))];\n}\n\nconst iocs = [];\nconst ruleLevel = Number(alert.rule?.level || 0);\n\n// Hashes\npushIOC(iocs, \"sha256\", alert.syscheck?.sha256_after, \"syscheck.sha256_after\");\npushIOC(iocs, \"sha1\", alert.syscheck?.sha1_after, \"syscheck.sha1_after\");\npushIOC(iocs, \"md5\", alert.syscheck?.md5_after, \"syscheck.md5_after\");\n\n// IPs\nconst candidateIPs = [\n  { value: alert.data?.srcip, source: \"data.srcip\" },\n  { value: alert.data?.dstip, source: \"data.dstip\" },\n  { value: alert.data?.win?.eventdata?.destinationIp, source: \"win.eventdata.destinationIp\" },\n  { value: alert.data?.win?.eventdata?.sourceIp, source: \"win.eventdata.sourceIp\" },\n];\n\nfor (const item of candidateIPs) {\n  if (item.value && isIPv4(String(item.value)) && !isPrivateOrLocalIP(String(item.value))) {\n    pushIOC(iocs, \"ip\", item.value, item.source);\n  }\n}\n\n// Domains\nconst structuredDomains = [\n  { value: alert.data?.hostname, source: \"data.hostname\" },\n  { value: alert.data?.win?.eventdata?.queryName, source: \"win.eventdata.queryName\" },\n  { value: alert.data?.win?.eventdata?.destinationHostname, source: \"win.eventdata.destinationHostname\" },\n];\n\nfor (const item of structuredDomains) {\n  const d = normalizeDomain(item.value);\n  if (d && d.includes(\".\")) pushIOC(iocs, \"domain\", d, item.source);\n}\n\n// URLs\nconst structuredUrls = [\n  { value: alert.data?.url, source: \"data.url\" },\n  { value: alert.data?.win?.eventdata?.targetUrl, source: \"win.eventdata.targetUrl\" },\n  { value: alert.data?.win?.eventdata?.url, source: \"win.eventdata.url\" },\n  { value: alert.data?.win?.eventdata?.destinationUrl, source: \"win.eventdata.destinationUrl\" },\n  { value: alert.data?.win?.eventdata?.requestUrl, source: \"win.eventdata.requestUrl\" },\n];\n\nfor (const item of structuredUrls) {\n  if (!item.value) continue;\n  const u = cleanUrl(item.value);\n  pushIOC(iocs, \"url\", u, item.source);\n  const host = getHostFromUrl(u);\n  if (!host) continue;\n  pushDerivedHostIOC(iocs, host, `derived_from_${item.source}_url`);\n}\n\n// Free Text Sources\nconst freeTextSources = [\n  { value: alert.data?.win?.eventdata?.commandLine, source: \"win.eventdata.commandLine\" },\n  { value: alert.data?.win?.eventdata?.parentCommandLine, source: \"win.eventdata.parentCommandLine\" },\n];\n\nconst urlRegex = /\\bhttps?:\\/\\/(?:(?:\\d{1,3}\\.){3}\\d{1,3}|(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})(?::\\d{1,5})?(?:\\/[^\\s\"'<>\\\\]*)?/gi;\nconst extractedUrlHosts = [];\n\nfor (const item of freeTextSources) {\n  if (!item.value || typeof item.value !== \"string\") continue;\n  const matches = item.value.match(urlRegex);\n  if (!matches) continue;\n  for (let match of matches) {\n    const u = cleanUrl(match);\n    pushIOC(iocs, \"url\", u, item.source);\n    const host = getHostFromUrl(u);\n    if (!host) continue;\n    extractedUrlHosts.push(host);\n    pushDerivedHostIOC(iocs, host, `derived_from_${item.source}_url`);\n  }\n}\n\nfor (const item of freeTextSources) {\n  if (!item.value || typeof item.value !== \"string\") continue;\n  const ips = extractIPsFromText(item.value);\n  for (const ip of ips) {\n    if (!isPrivateOrLocalIP(ip)) {\n      pushIOC(iocs, \"ip\", ip, item.source);\n    }\n  }\n}\n\nconst domainTextSources = [\n  { value: alert.data?.win?.eventdata?.commandLine, source: \"win.eventdata.commandLine\" },\n  { value: alert.data?.win?.eventdata?.parentCommandLine, source: \"win.eventdata.parentCommandLine\" },\n  { value: alert.full_log, source: \"full_log\" },\n];\n\nfor (const item of domainTextSources) {\n  const domains = extractDomainsFromText(item.value, extractedUrlHosts);\n  for (const d of domains) {\n    pushIOC(iocs, \"domain\", d, item.source);\n  }\n}\n\nconst priority = [\"sha256\", \"md5\", \"sha1\", \"url\", \"domain\", \"ip\"];\nlet primary = null;\nfor (const p of priority) {\n  const found = iocs.find(i => i.type === p);\n  if (found) {\n    primary = found;\n    break;\n  }\n}\n\n\nreturn [{\n  json: {\n    alert_id: alert.id || null,\n    timestamp: alert.timestamp || null,\n\n    agent_name: alert.agent?.name || \"N/A\",\n    agent_id: alert.agent?.id || \"N/A\",\n    agent_ip: alert.agent?.ip || null,\n\n    rule_id: alert.rule?.id || null,\n    rule_level: ruleLevel,\n    rule_description: alert.rule?.description || \"N/A\",\n    severity_label: mapSeverity(ruleLevel),\n\n    decoder_name: alert.decoder?.name || null,\n    location: alert.location || null,\n    full_log: alert.full_log || \"\",\n\n    process_name: alert.data?.win?.eventdata?.image || null,\n    command_line: alert.data?.win?.eventdata?.commandLine || null,\n    parent_process: alert.data?.win?.eventdata?.parentImage || null,\n    parent_command_line: alert.data?.win?.eventdata?.parentCommandLine || null,\n\n    path: alert.syscheck?.path || null,\n    event_action: alert.syscheck?.event || null,\n    value_name: alert.syscheck?.value_name || null,\n\n    iocs,\n    ioc_count: iocs.length,\n    primary_ioc_type: primary?.type || null,\n    primary_ioc_value: primary?.value || null,\n    primary_ioc_source: primary?.source || null,\n\n    should_search_misp: iocs.length > 0,\n    should_create_alert: ruleLevel >= 7 || iocs.length > 0,\n\n    webhook_url: root.webhookUrl || null,\n    execution_mode: root.executionMode || null,\n\n    raw_alert: alert\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        0
+      ],
+      "id": "23b54cd2-bf0d-4b48-9151-aad1073c6d37",
+      "name": "Normalize Wazuh Alert & Extract IOCs"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "09ea73ef-feda-41d2-84ae-36aa5d7e7de8",
+              "leftValue": "={{ $json.ioc_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        352,
+        -96
+      ],
+      "id": "0703b4a2-b447-4dc1-942b-84e88a5d455a",
+      "name": "If Has Extracted IOCs"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "iocs",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        784,
+        -112
+      ],
+      "id": "e037cccd-0874-4b39-8242-dc0ff9cd6c14",
+      "name": "Split Extracted IOCs"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "value": "={{ $json.iocs.value }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.misp",
+      "typeVersion": 1,
+      "position": [
+        784,
+        144
+      ],
+      "id": "75aec860-e84c-468d-aa8a-bfbda6c17382",
+      "name": "Search MISP Attributes by IOC",
+      "alwaysOutputData": true,
+      "credentials": {
+        "mispApi": {
+          "id": "u38S2L0kRKreSII0",
+          "name": "MISP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferInput1"
+            }
+          },
+          "includeUnpaired": true
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1184,
+        -16
+      ],
+      "id": "33e3d334-7b40-4424-bec9-9ee1a3107faa",
+      "name": "Merge IOC Context with MISP Results",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\n\nif (items.length === 0) {\n  return [];\n}\n\n// عنصر السياق العام\nconst contextItem =\n  items.find(item =>\n    item.alert_id ||\n    item.rule_id ||\n    item.agent_name ||\n    item.full_log\n  ) || items[0];\n\n// اجمع كل IOCs القادمة من Wazuh من كل العناصر\nconst allIocs = [];\nconst iocSeen = new Set();\n\nfunction pushIOC(type, value, source) {\n  if (!type || !value) return;\n  const t = String(type).trim().toLowerCase();\n  const v = String(value).trim();\n  const s = source ? String(source).trim() : null;\n  if (!t || !v) return;\n\n  const key = `${t}:${v}`;\n  if (iocSeen.has(key)) return;\n  iocSeen.add(key);\n\n  allIocs.push({\n    type: t,\n    value: v,\n    source: s\n  });\n}\n\nfor (const item of items) {\n  // إذا iocs مصفوفة\n  if (Array.isArray(item.iocs)) {\n    for (const ioc of item.iocs) {\n      pushIOC(ioc?.type, ioc?.value, ioc?.source);\n    }\n  }\n  // إذا iocs object واحد\n  else if (item.iocs && typeof item.iocs === \"object\") {\n    pushIOC(item.iocs.type, item.iocs.value, item.iocs.source);\n  }\n\n  // احتياط: لو الـ Split Out جعل الـ IOC نفسها في الحقول المباشرة\n  if (item.type && item.value && item.source && !item.alert_id) {\n    pushIOC(item.type, item.value, item.source);\n  }\n}\n\n// اجمع فقط نتائج MISP الحقيقية\nconst mispItems = items.filter(item =>\n  item &&\n  (\n    item.value ||\n    item.type ||\n    item.comment ||\n    item.Event?.info ||\n    item.Tag?.[0]?.name\n  )\n);\n\nconst matches = mispItems.map(item => ({\n  matched_ioc_value: item.value || null,\n  matched_ioc_type: item.type || null,\n  matched_ioc_comment: item.comment || null,\n  matched_event_info: item.Event?.info || null,\n  matched_tag: item.Tag?.[0]?.name || null,\n  to_ids: item.to_ids ?? null\n}));\n\nconst originalTimestamp =\n  contextItem.raw_alert?.timestamp ||\n  contextItem.timestamp ||\n  null;\n\nconst ruleLevel = Number(contextItem.rule_level || 0);\nconst hasMispMatch = matches.length > 0;\nconst highSeverity = ruleLevel >= 12;\n\nlet alert_reason = \"none\";\nif (hasMispMatch) {\n  alert_reason = \"misp\";\n} else if (highSeverity) {\n  alert_reason = \"severity\";\n}\n\nreturn [{\n  json: {\n    ...contextItem,\n    timestamp: originalTimestamp,\n    iocs: allIocs,\n    ioc_count: allIocs.length,\n    match_count: matches.length,\n    matches,\n    has_misp_match: hasMispMatch,\n    high_severity: highSeverity,\n    alert_reason\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -16
+      ],
+      "id": "18f0f1ed-c1bf-4242-b0f2-bf15ec45d93e",
+      "name": "Aggregate MISP Matches & Rebuild IOC Context",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a7e776ee-dc2a-4a08-8010-9d3bfb270ef0",
+              "leftValue": "={{ $json.match_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "0048011a-2db6-48a3-97ef-cca6221d3071",
+              "leftValue": "={{ $json.rule_level }}",
+              "rightValue": 12,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1664,
+        -16
+      ],
+      "id": "b3acee71-7531-41bd-8b4c-80fa0653c7be",
+      "name": "Escalate to TheHive? (MISP Match or Severity ≥ 12)"
+    },
+    {
+      "parameters": {
+        "alertFields": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "title": "={{ $json.thehive_title }}",
+            "description": "={{ $json.thehive_description }}",
+            "type": "external",
+            "source": "={{ ($json.match_count || 0) > 0 ? \"n8n-misp-match\" : \"n8n-high-severity\" }}",
+            "sourceRef": "=={{ $json.thehive_source_ref }}",
+            "severity": "={{ $json.severity_label === \"critical\" ? 4 : $json.severity_label === \"high\" ? 3 : $json.severity_label === \"medium\" ? 2 : 1 }}",
+            "tlp": 2,
+            "pap": 2,
+            "tags": "={{ $json.thehive_tags }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "displayName": "Title",
+              "id": "title",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Description",
+              "id": "description",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Type",
+              "id": "type",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Source",
+              "id": "source",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Source Reference",
+              "id": "sourceRef",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "External Link",
+              "id": "externalLink",
+              "type": "string",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Severity (Severity of information)",
+              "id": "severity",
+              "type": "options",
+              "options": [
+                {
+                  "name": "Low",
+                  "value": 1
+                },
+                {
+                  "name": "Medium",
+                  "value": 2
+                },
+                {
+                  "name": "High",
+                  "value": 3
+                },
+                {
+                  "name": "Critical",
+                  "value": 4
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Date",
+              "id": "date",
+              "type": "dateTime",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Tags",
+              "id": "tags",
+              "type": "string",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Follow",
+              "id": "follow",
+              "type": "boolean",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Flag",
+              "id": "flag",
+              "type": "boolean",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "TLP (Confidentiality of information)",
+              "id": "tlp",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "PAP (Level of exposure of information)",
+              "id": "pap",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Summary",
+              "id": "summary",
+              "type": "string",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Status",
+              "id": "status",
+              "type": "options",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false,
+              "options": [
+                {
+                  "name": "Duplicate",
+                  "value": "Duplicate",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "FalsePositive",
+                  "value": "FalsePositive",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "Ignored",
+                  "value": "Ignored",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "Imported",
+                  "value": "Imported",
+                  "description": "Stage: Imported"
+                },
+                {
+                  "name": "InProgress",
+                  "value": "InProgress",
+                  "description": "Stage: InProgress"
+                },
+                {
+                  "name": "New",
+                  "value": "New",
+                  "description": "Stage: New"
+                },
+                {
+                  "name": "Pending",
+                  "value": "Pending",
+                  "description": "Stage: InProgress"
+                }
+              ]
+            },
+            {
+              "displayName": "Case Template",
+              "id": "caseTemplate",
+              "type": "options",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false,
+              "options": []
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        2176,
+        -176
+      ],
+      "id": "c52f2cb4-ae5d-4646-944e-c59f39125ed5",
+      "name": "Create TheHive Alert",
+      "alwaysOutputData": false,
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2176,
+        128
+      ],
+      "id": "5bfe1db4-42b3-4134-a356-43aac528664e",
+      "name": "Merge TheHive Alert ID with Observables Payload"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "thehive_observables",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2592,
+        128
+      ],
+      "id": "e89a9b79-d3a5-4633-bea0-f9d7568d0663",
+      "name": "Split TheHive Observables"
+    },
+    {
+      "parameters": {
+        "resource": "observable",
+        "createIn": "alert",
+        "id": {
+          "__rl": true,
+          "value": "={{ $json._id }}",
+          "mode": "id"
+        },
+        "dataType": "={{ $json.thehive_observables.dataType }}",
+        "data": "={{ $json.thehive_observables.data }}",
+        "observableFields": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ioc": false,
+            "sighted": false,
+            "ignoreSimilarity": false,
+            "message": "={{ $json.thehive_observables.message }}",
+            "tags": "={{ $json.thehive_observables.tags }}",
+            "tlp": 2,
+            "pap": 2
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "displayName": "Start Date",
+              "id": "startDate",
+              "type": "dateTime",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Description",
+              "id": "message",
+              "type": "string",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Tags",
+              "id": "tags",
+              "type": "string",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "TLP (Confidentiality of information)",
+              "id": "tlp",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "PAP (Level of exposure of information)",
+              "id": "pap",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "IOC",
+              "id": "ioc",
+              "type": "boolean",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Sighted",
+              "id": "sighted",
+              "type": "boolean",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Sighted At",
+              "id": "sightedAt",
+              "type": "dateTime",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Ignore Similarity",
+              "id": "ignoreSimilarity",
+              "type": "boolean",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Is Zip",
+              "id": "isZip",
+              "type": "boolean",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Zip Password",
+              "id": "zipPassword",
+              "type": "string",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        2800,
+        128
+      ],
+      "id": "1449c39e-ae5f-4d91-9857-6d3bf3f5de51",
+      "name": "Create TheHive Observable",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.dataType }}",
+                    "rightValue": "hash",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "64274121-60d7-4bd6-b891-2a6d36f97d63"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "e95f358f-ca91-49b3-b47b-916443c02cb8",
+                    "leftValue": "={{ $json.dataType }}",
+                    "rightValue": "ip",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "19651bd6-bdfd-42a4-a861-46e79703c6a8",
+                    "leftValue": "={{ $json.dataType }}",
+                    "rightValue": "=domain",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "a7134ad5-5b2a-48ec-8a11-f1bacf3e082e",
+                    "leftValue": "={{ $json.dataType }}",
+                    "rightValue": "url",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2960,
+        96
+      ],
+      "id": "c3af1cb2-db31-449b-a285-c90d2b60464d",
+      "name": "Route Observable by Type"
+    },
+    {
+      "parameters": {
+        "resource": "observable",
+        "operation": "executeAnalyzer",
+        "observableId": {
+          "__rl": true,
+          "value": "={{ $json._id }}",
+          "mode": "id"
+        },
+        "dataType": "={{ $json.dataType }}",
+        "analyzers": [
+          "f3552202f45a990137e1e20d33f90357::cortex0"
+        ]
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        3184,
+        -112
+      ],
+      "id": "22cd5221-13fd-4276-81bb-4aa6720cee92",
+      "name": "Run Hash Analyzer (VirusTotal)",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "observable",
+        "operation": "executeAnalyzer",
+        "observableId": {
+          "__rl": true,
+          "value": "={{ $json._id }}",
+          "mode": "id"
+        },
+        "dataType": "={{ $json.dataType }}",
+        "analyzers": [
+          "2b2792c0d34002d5c03ddd775e7236ae::cortex0"
+        ]
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        3184,
+        96
+      ],
+      "id": "2ec5f4d0-eb83-4671-9df4-1cc9121fcb92",
+      "name": "Run IP Analyzer (AbuseIPDB)",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "observable",
+        "operation": "executeAnalyzer",
+        "observableId": {
+          "__rl": true,
+          "value": "={{ $json._id }}",
+          "mode": "id"
+        },
+        "dataType": "={{ $json.dataType }}",
+        "analyzers": [
+          "1abeaffdba4d87c36fa3e6b69ad7ef99::cortex0"
+        ]
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        3184,
+        320
+      ],
+      "id": "d84c7584-ce63-4985-ba01-6faf6f7c02f1",
+      "name": "Run Domain Analyzer (OTX)",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "observable",
+        "operation": "executeAnalyzer",
+        "observableId": {
+          "__rl": true,
+          "value": "={{ $json._id }}",
+          "mode": "id"
+        },
+        "dataType": "={{ $json.dataType }}",
+        "analyzers": [
+          "1abeaffdba4d87c36fa3e6b69ad7ef99::cortex0"
+        ]
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        3184,
+        544
+      ],
+      "id": "c64d6cf9-341c-45d6-9046-918ddbf4e90f",
+      "name": "Run URL Analyzer (OTX)",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\n\nconst tags = [\n  \"source:wazuh\",\n  \"workflow:n8n\",\n  \"high-severity\",\n  `rule:${item.rule_id || \"unknown\"}`,\n  `severity:${item.severity_label || \"unknown\"}`,\n  `decoder:${item.decoder_name || \"unknown\"}`\n];\n\nconst lines = [];\nlines.push(\"Critical Wazuh alert (rule level >= 12) escalated automatically.\");\nlines.push(\"\");\nlines.push(`Agent: ${item.agent_name || \"N/A\"} (${item.agent_ip || \"N/A\"})`);\nlines.push(`Rule ID: ${item.rule_id || \"N/A\"}`);\nlines.push(`Rule Level: ${item.rule_level ?? \"N/A\"}`);\nlines.push(`Rule: ${item.rule_description || \"N/A\"}`);\nlines.push(`Severity: ${item.severity_label || \"N/A\"}`);\nlines.push(`Decoder: ${item.decoder_name || \"N/A\"}`);\nlines.push(`Location: ${item.location || \"N/A\"}`);\nlines.push(`Path: ${item.path || \"N/A\"}`);\nlines.push(`Event Action: ${item.event_action || \"N/A\"}`);\nlines.push(`Primary IOC Type: ${item.primary_ioc_type || \"N/A\"}`);\nlines.push(`Primary IOC Value: ${item.primary_ioc_value || \"N/A\"}`);\nlines.push(\"\");\nlines.push(\"Original log:\");\nlines.push(item.full_log || \"N/A\");\n\nreturn [{\n  json: {\n    ...item,\n    thehive_title: `High Severity Alert | ${item.agent_name || \"N/A\"} | Rule ${item.rule_id || \"N/A\"} | Level ${item.rule_level ?? \"N/A\"}`,\n    thehive_description: lines.join(\"\\n\"),\n    thehive_tags: [...new Set(tags)]\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        384
+      ],
+      "id": "621e124a-62b3-4d7c-af28-5d4fa6c37606",
+      "name": "Build High Severity Alert Payload"
+    },
+    {
+      "parameters": {
+        "alertFields": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "title": "={{ $json.thehive_title }}",
+            "description": "={{ $json.thehive_description }}",
+            "type": "external",
+            "source": "n8n-high-severity",
+            "sourceRef": "=={{ $json.agent_name }}-{{ $json.primary_ioc_value }}-{{ ($json.timestamp || \"\").substring(0,16) }}",
+            "tags": "={{ $json.thehive_tags }}",
+            "tlp": 2,
+            "pap": 2,
+            "severity": "={{ \n  Number($json.rule_level) >= 14 ? 4 :\n  Number($json.rule_level) >= 12 ? 3 :\n  2\n}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "displayName": "Title",
+              "id": "title",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Description",
+              "id": "description",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Type",
+              "id": "type",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Source",
+              "id": "source",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Source Reference",
+              "id": "sourceRef",
+              "type": "string",
+              "removed": false,
+              "required": true,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "External Link",
+              "id": "externalLink",
+              "type": "string",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Severity (Severity of information)",
+              "id": "severity",
+              "type": "options",
+              "options": [
+                {
+                  "name": "Low",
+                  "value": 1
+                },
+                {
+                  "name": "Medium",
+                  "value": 2
+                },
+                {
+                  "name": "High",
+                  "value": 3
+                },
+                {
+                  "name": "Critical",
+                  "value": 4
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Date",
+              "id": "date",
+              "type": "dateTime",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Tags",
+              "id": "tags",
+              "type": "string",
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Follow",
+              "id": "follow",
+              "type": "boolean",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Flag",
+              "id": "flag",
+              "type": "boolean",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "TLP (Confidentiality of information)",
+              "id": "tlp",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "PAP (Level of exposure of information)",
+              "id": "pap",
+              "type": "options",
+              "options": [
+                {
+                  "name": "White",
+                  "value": 0
+                },
+                {
+                  "name": "Green",
+                  "value": 1
+                },
+                {
+                  "name": "Amber",
+                  "value": 2
+                },
+                {
+                  "name": "Red",
+                  "value": 3
+                }
+              ],
+              "removed": false,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Summary",
+              "id": "summary",
+              "type": "string",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false
+            },
+            {
+              "displayName": "Status",
+              "id": "status",
+              "type": "options",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false,
+              "options": [
+                {
+                  "name": "Duplicate",
+                  "value": "Duplicate",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "FalsePositive",
+                  "value": "FalsePositive",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "Ignored",
+                  "value": "Ignored",
+                  "description": "Stage: Closed"
+                },
+                {
+                  "name": "Imported",
+                  "value": "Imported",
+                  "description": "Stage: Imported"
+                },
+                {
+                  "name": "InProgress",
+                  "value": "InProgress",
+                  "description": "Stage: InProgress"
+                },
+                {
+                  "name": "New",
+                  "value": "New",
+                  "description": "Stage: New"
+                },
+                {
+                  "name": "Pending",
+                  "value": "Pending",
+                  "description": "Stage: InProgress"
+                }
+              ]
+            },
+            {
+              "displayName": "Case Template",
+              "id": "caseTemplate",
+              "type": "options",
+              "removed": true,
+              "required": false,
+              "display": true,
+              "defaultMatch": false,
+              "options": []
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.theHiveProject",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        384
+      ],
+      "id": "59aa54a1-7a6b-49de-82a8-91f7a48b4594",
+      "name": "Create High Severity TheHive Alert",
+      "credentials": {
+        "theHiveProjectApi": {
+          "id": "Y2ZCdXdeQgu9EEFE",
+          "name": "The Hive 5 account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1696,
+        304
+      ],
+      "id": "c7e372e9-bd46-46db-8b8c-bd1d7360aea0",
+      "name": "No Escalation - Stop"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\n\nconst matches = Array.isArray(item.matches) ? item.matches : [];\nconst iocs = Array.isArray(item.iocs)\n  ? item.iocs\n  : (item.iocs && typeof item.iocs === \"object\" ? [item.iocs] : []);\n\nfunction splitTags(tagString) {\n  if (!tagString) return [];\n  if (Array.isArray(tagString)) return tagString.filter(Boolean);\n  return String(tagString)\n    .split(\",\")\n    .map(t => t.trim())\n    .filter(Boolean);\n}\n\nfunction normalizeObservableFromIOC(ioc) {\n  if (!ioc || !ioc.type || !ioc.value) return null;\n\n  const t = String(ioc.type).toLowerCase();\n  const v = String(ioc.value).trim();\n  if (!v) return null;\n\n  if (t === \"ip\") {\n    return {\n      key: `ip:${v}`,\n      dataType: \"ip\",\n      data: v,\n      messages: [`Extracted from Wazuh (${ioc.source || \"unknown source\"})`],\n      tags: [\"source:wazuh\"]\n    };\n  }\n\n  if (t === \"domain\") {\n    return {\n      key: `domain:${v}`,\n      dataType: \"domain\",\n      data: v,\n      messages: [`Extracted from Wazuh (${ioc.source || \"unknown source\"})`],\n      tags: [\"source:wazuh\"]\n    };\n  }\n\n  if (t === \"url\") {\n    return {\n      key: `url:${v}`,\n      dataType: \"url\",\n      data: v,\n      messages: [`Extracted from Wazuh (${ioc.source || \"unknown source\"})`],\n      tags: [\"source:wazuh\"]\n    };\n  }\n\n  if (t === \"sha256\" || t === \"sha1\" || t === \"md5\") {\n    return {\n      key: `hash:${v}`,\n      dataType: \"hash\",\n      data: v,\n      messages: [`Extracted from Wazuh (${t})`],\n      tags: [\"source:wazuh\", `hash:${t}`]\n    };\n  }\n\n  return null;\n}\n\nfunction normalizeObservableFromMatch(match) {\n  if (!match || !match.matched_ioc_value || !match.matched_ioc_type) return null;\n\n  const t = String(match.matched_ioc_type).toLowerCase();\n  const raw = String(match.matched_ioc_value).trim();\n  if (!raw) return null;\n\n  if (t.includes(\"ip\")) {\n    const ip = raw.includes(\"|\") ? raw.split(\"|\")[0].trim() : raw;\n\n    return {\n      key: `ip:${ip}`,\n      dataType: \"ip\",\n      data: ip,\n      messages: [\n        [\n          match.matched_ioc_comment,\n          match.matched_event_info,\n          raw !== ip ? `raw:${raw}` : null\n        ].filter(Boolean).join(\" | \")\n      ],\n      tags: [\n        \"source:misp\",\n        match.matched_tag,\n        match.matched_event_info\n      ].filter(Boolean)\n    };\n  }\n\n  if (t.includes(\"domain\") || t.includes(\"hostname\")) {\n    return {\n      key: `domain:${raw}`,\n      dataType: \"domain\",\n      data: raw,\n      messages: [[match.matched_ioc_comment, match.matched_event_info].filter(Boolean).join(\" | \")],\n      tags: [\"source:misp\", match.matched_tag, match.matched_event_info].filter(Boolean)\n    };\n  }\n\n  if (t.includes(\"url\")) {\n    return {\n      key: `url:${raw}`,\n      dataType: \"url\",\n      data: raw,\n      messages: [[match.matched_ioc_comment, match.matched_event_info].filter(Boolean).join(\" | \")],\n      tags: [\"source:misp\", match.matched_tag, match.matched_event_info].filter(Boolean)\n    };\n  }\n\n  if (t.includes(\"sha256\") || t.includes(\"sha1\") || t.includes(\"md5\")) {\n    return {\n      key: `hash:${raw}`,\n      dataType: \"hash\",\n      data: raw,\n      messages: [[match.matched_ioc_comment, match.matched_event_info].filter(Boolean).join(\" | \")],\n      tags: [\"source:misp\", match.matched_tag, match.matched_event_info, `hash:${t}`].filter(Boolean)\n    };\n  }\n\n  return null;\n}\n\nconst observableMap = new Map();\n\nfunction upsertObservable(obs) {\n  if (!obs) return;\n\n  if (!observableMap.has(obs.key)) {\n    observableMap.set(obs.key, {\n      dataType: obs.dataType,\n      data: obs.data,\n      messages: [...new Set(obs.messages || [])],\n      tags: [...new Set(obs.tags || [])]\n    });\n    return;\n  }\n\n  const existing = observableMap.get(obs.key);\n  existing.messages = [...new Set([...(existing.messages || []), ...(obs.messages || [])])];\n  existing.tags = [...new Set([...(existing.tags || []), ...(obs.tags || [])])];\n  observableMap.set(obs.key, existing);\n}\n\nfor (const ioc of iocs) {\n  upsertObservable(normalizeObservableFromIOC(ioc));\n}\n\nfor (const match of matches) {\n  upsertObservable(normalizeObservableFromMatch(match));\n}\n\nconst observables = Array.from(observableMap.values()).map(obs => ({\n  dataType: obs.dataType,\n  data: obs.data,\n  message: obs.messages.join(\" || \"),\n  tags: obs.tags.join(\",\")\n}));\n\nconst isMispPath = (item.match_count || 0) > 0;\nconst isSeverityPath = !isMispPath && Number(item.rule_level || 0) >= 12;\n\nconst tags = [\n  \"source:wazuh\",\n  \"workflow:n8n\",\n  `rule:${item.rule_id || \"unknown\"}`,\n  `severity:${item.severity_label || \"unknown\"}`,\n  `decoder:${item.decoder_name || \"unknown\"}`\n];\n\nif (isMispPath) {\n  tags.push(\"source:misp\", \"misp-match\");\n}\n\nif (isSeverityPath) {\n  tags.push(\"high-severity\", \"severity-threshold:12\");\n}\n\nfor (const m of matches) {\n  if (m.matched_tag) tags.push(`malware:${m.matched_tag}`);\n}\n\nconst uniqueTags = [...new Set(tags)];\n\nconst lines = [];\nlines.push(\n  isMispPath\n    ? \"Wazuh alert enriched by MISP.\"\n    : \"High severity Wazuh alert escalated automatically.\"\n);\nlines.push(\"\");\nlines.push(`Agent: ${item.agent_name || \"N/A\"} (${item.agent_ip || \"N/A\"})`);\nlines.push(`Rule ID: ${item.rule_id || \"N/A\"}`);\nlines.push(`Rule Level: ${item.rule_level ?? \"N/A\"}`);\nlines.push(`Rule: ${item.rule_description || \"N/A\"}`);\nlines.push(`Severity: ${item.severity_label || \"N/A\"}`);\nlines.push(`Decoder: ${item.decoder_name || \"N/A\"}`);\nlines.push(`Location: ${item.location || \"N/A\"}`);\nlines.push(`Path: ${item.path || \"N/A\"}`);\nlines.push(`Event Action: ${item.event_action || \"N/A\"}`);\nlines.push(`MISP Matches Count: ${item.match_count || 0}`);\nlines.push(`Unique Observables Count: ${observables.length}`);\nlines.push(\"\");\n\nif (matches.length > 0) {\n  lines.push(\"Matched observables:\");\n  matches.forEach((m, idx) => {\n    lines.push(`${idx + 1}. ${m.matched_ioc_value || \"N/A\"} | ${m.matched_ioc_type || \"N/A\"} | ${m.matched_tag || \"N/A\"} | ${m.matched_event_info || \"N/A\"}`);\n  });\n  lines.push(\"\");\n}\n\nif (iocs.length > 0) {\n  lines.push(\"Extracted IOCs:\");\n  iocs.forEach((ioc, idx) => {\n    lines.push(`${idx + 1}. ${ioc.value || \"N/A\"} | ${ioc.type || \"N/A\"} | ${ioc.source || \"N/A\"}`);\n  });\n  lines.push(\"\");\n}\n\nlines.push(\"Original log:\");\nlines.push(item.full_log || \"N/A\");\n\nconst titlePrefix = isMispPath ? \"MISP Match\" : \"High Severity Alert\";\n\n// =========================================================================\n// التعديل الجديد: توليد بصمة فريدة تمنع التكرار في نفس الدقيقة (Deduplication)\n// =========================================================================\nconst safeTime = (item.timestamp || \"\").substring(0, 16).replace(/:/g, \"-\");\nconst primaryIoc = item.primary_ioc_value || item.rule_id || \"Alert\";\nconst customSourceRef = `${item.agent_name || \"NA\"}-${primaryIoc}-${safeTime}`;\n// =========================================================================\n\nreturn [{\n  json: {\n    ...item,\n    thehive_title: `${titlePrefix} | ${item.agent_name || \"N/A\"} | Rule ${item.rule_id || \"N/A\"} | ${observables.length} unique observables`,\n    thehive_description: lines.join(\"\\n\"),\n    thehive_tags: uniqueTags,\n    thehive_observables: observables,\n    thehive_source_ref: customSourceRef // تمرير البصمة الجاهزة للخطوة التالية\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        -32
+      ],
+      "id": "e8c9bfa5-0891-433a-9ace-feda18033b22",
+      "name": "Build TheHive Alert Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\n\n// فحص قاطع: هل التنبيه مرفوض من TheHive (يحتوي على خطأ) أو لا يمتلك ID؟\nif (item.error || !item._id) {\n    // إرجاع مصفوفة فارغة يجعل n8n يوقف هذا المسار بصمت تام! \n    // لن يظهر لون أحمر، ولن تنتقل البيانات للخطوة التالية.\n    return [];\n}\n\n// أما إذا كان التنبيه سليماً وناجحاً، مرره للخطوة التالية\nreturn [{ json: item }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        128
+      ],
+      "id": "8e2015c2-027b-49ef-9609-798b8f7ded61",
+      "name": "Check if Alert is made or not"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "High Severity Without IOC": {
+      "main": [
+        [
+          {
+            "node": "Build High Severity Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receive Wazuh Alert": {
+      "main": [
+        [
+          {
+            "node": "Normalize Wazuh Alert & Extract IOCs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Wazuh Alert & Extract IOCs": {
+      "main": [
+        [
+          {
+            "node": "If Has Extracted IOCs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Has Extracted IOCs": {
+      "main": [
+        [
+          {
+            "node": "Split Extracted IOCs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "High Severity Without IOC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Extracted IOCs": {
+      "main": [
+        [
+          {
+            "node": "Search MISP Attributes by IOC",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge IOC Context with MISP Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search MISP Attributes by IOC": {
+      "main": [
+        [
+          {
+            "node": "Merge IOC Context with MISP Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge IOC Context with MISP Results": {
+      "main": [
+        [
+          {
+            "node": "Aggregate MISP Matches & Rebuild IOC Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate MISP Matches & Rebuild IOC Context": {
+      "main": [
+        [
+          {
+            "node": "Escalate to TheHive? (MISP Match or Severity ≥ 12)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate to TheHive? (MISP Match or Severity ≥ 12)": {
+      "main": [
+        [
+          {
+            "node": "Build TheHive Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Escalation - Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create TheHive Alert": {
+      "main": [
+        [
+          {
+            "node": "Merge TheHive Alert ID with Observables Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge TheHive Alert ID with Observables Payload": {
+      "main": [
+        [
+          {
+            "node": "Check if Alert is made or not",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split TheHive Observables": {
+      "main": [
+        [
+          {
+            "node": "Create TheHive Observable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create TheHive Observable": {
+      "main": [
+        [
+          {
+            "node": "Route Observable by Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Observable by Type": {
+      "main": [
+        [
+          {
+            "node": "Run Hash Analyzer (VirusTotal)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run IP Analyzer (AbuseIPDB)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Domain Analyzer (OTX)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run URL Analyzer (OTX)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "Build High Severity Alert Payload": {
+      "main": [
+        [
+          {
+            "node": "Create High Severity TheHive Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build TheHive Alert Payload": {
+      "main": [
+        [
+          {
+            "node": "Create TheHive Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge TheHive Alert ID with Observables Payload",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Check if Alert is made or not": {
+      "main": [
+        [
+          {
+            "node": "Split TheHive Observables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "1df73520-a0ff-4c49-ae15-72ccd9552898",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cd03af7063b1311cc6ed6082065b02dfc87620d6866bb68289fa8298916ffec5"
+  },
+  "id": "CPpdQ3jk4zBmM7nO",
+  "tags": []
+}

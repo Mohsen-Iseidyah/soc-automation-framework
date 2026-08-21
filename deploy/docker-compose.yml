@@ -1,0 +1,202 @@
+
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    restart: unless-stopped
+    environment:
+      - CASSANDRA_CLUSTER_NAME=TheHive
+      - CASSANDRA_NUM_TOKENS=4
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=256M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks: [soc_net]
+
+  thehive-es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    container_name: thehive-es
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - cluster.name=hive
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - thehive_es_data:/usr/share/elasticsearch/data
+    networks: [soc_net]
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: ["minio", "server", "/data", "--console-address", ":9002"]
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9002:9002"
+      - "9003:9000"
+    volumes:
+      - minio_data:/data
+    networks: [soc_net]
+
+  thehive:
+    image: strangebee/thehive:5.2
+    container_name: thehive
+    restart: unless-stopped
+    depends_on:
+      - cassandra
+      - thehive-es
+      - minio
+      - cortex
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./Thehive/application.conf:/etc/thehive/application.conf:ro
+      - thehive_files:/opt/thp/thehive/files
+      - thehive_logs:/var/log/thehive
+    command: ["--no-config-secret"]
+    networks: [soc_net]
+
+  cortex:
+    image: thehiveproject/cortex:latest
+    container_name: cortex
+    restart: unless-stopped
+    depends_on:
+      - thehive-es
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./Cortex/application.conf:/etc/cortex/application.conf
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./Cortex/jobs:/tmp/cortex-jobs
+      - ./Cortex/logs:/var/log/cortex
+    environment:
+      - job_directory=/tmp/cortex-jobs
+      - docker_job_directory=${CORTEX_JOB_DIR}
+      - es_uri=http://thehive-es:9200
+      - "JVM_OPTS=-Xms1g -Xmx1g"
+    networks: [soc_net]
+
+  redis:
+    image: redis:latest
+    container_name: misp-redis
+    restart: unless-stopped
+    networks: [soc_net]
+
+  db:
+    image: mysql:8.0
+    container_name: misp-db
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MISP_DB_ROOT_PASSWORD}
+    volumes:
+      - misp_mysql:/var/lib/mysql
+    networks: [soc_net]
+
+  misp:
+    image: coolacid/misp-docker:core-latest
+    container_name: misp
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - db
+    ports:
+      - "8080:80"
+      - "8443:443"
+    environment:
+      - BASEURL=https://${HOST_IP}:8443
+      - REDIS_FQDN=redis
+      - INIT=true
+      - CRON_USER_ID=1
+      - DB_HOST=db
+      - DB_NAME=misp
+      - DB_USER=misp
+      - DB_PASS=${MISP_DB_PASSWORD}
+      - MYSQL_HOST=db
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD}
+    volumes:
+      - ./misp/server-configs/:/var/www/MISP/app/Config/
+      - ./misp/logs/:/var/www/MISP/app/tmp/logs/
+      - ./misp/files/:/var/www/MISP/app/files
+      - ./misp/ssl/:/etc/nginx/certs
+    networks: [soc_net]
+
+  misp-modules:
+    image: coolacid/misp-docker:modules-latest
+    container_name: misp-modules
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      - REDIS_BACKEND=redis
+    networks: [soc_net]
+
+  n8n-db:
+    image: postgres:16
+    container_name: n8n-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=n8n
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=${N8N_DB_PASSWORD}
+    volumes:
+      - n8n_pg:/var/lib/postgresql/data
+    networks: [soc_net]
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      - n8n-db
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=n8n-db
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_PASSWORD}
+      - N8N_SECURE_COOKIE=false
+      - N8N_HOST=${HOST_IP}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://${HOST_IP}:5678
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binary_data
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks: [soc_net]
+
+volumes:
+  cassandra_data:
+  thehive_es_data:
+  minio_data:
+  thehive_files:
+  thehive_logs:
+  misp_mysql:
+  n8n_pg:
+  n8n_data:
+
+networks:
+  soc_net:
+    driver: bridge
