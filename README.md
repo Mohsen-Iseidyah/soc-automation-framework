@@ -132,7 +132,7 @@ Enrichment sources: VirusTotal, AbuseIPDB, AlienVault OTX.
 
 ## Authors
 
-Mohsen Taher Mohamed · Altahir Hassan Altahir Salim
+Mohsen Taher Iseidyah · Altahir Hassan Altahir Salim
 Supervisor: Salwa Abdulnabi — Sabha University
 
 ## License
