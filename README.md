@@ -90,8 +90,8 @@ scenario is VirusTotal free-tier rate limiting.
 Requires Docker and Docker Compose, ~20 GB RAM for the full stack, and a Wazuh server.
 
 ```bash
-git clone https://github.com/<your-username>/<repo>.git
-cd <repo>/deploy
+git clone https://github.com/altahirsalimit/Open-Source-SOC-Automation-Framework-for-IOC-driven-Incident-Response
+cd Open-Source-SOC-Automation-Framework-for-IOC-driven-Incident-Response/deploy
 cp .env.example .env        # then edit: set HOST_IP and generate real secrets
 docker compose up -d
 ```
@@ -131,7 +131,7 @@ Enrichment sources: VirusTotal, AbuseIPDB, AlienVault OTX.
 
 ## Authors
 
-Altahir Hassan Altahir Salim · Mohsen Taher Iseidyah
+Altahir Hassan Altahir Salim · Mohsen Taher Iseidyah 
 · Supervisor: Salwa Abdulnabi — Sabha University
 
 ## License
