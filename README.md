@@ -90,8 +90,8 @@ scenario is VirusTotal free-tier rate limiting.
 Requires Docker and Docker Compose, ~20 GB RAM for the full stack, and a Wazuh server.
 
 ```bash
-git clone https://github.com/Mohsen-Iseidyah/soc-automation-framework.git
-cd soc-automation-framework/deploy
+git clone https://github.com/<your-username>/<repo>.git
+cd <repo>/deploy
 cp .env.example .env        # then edit: set HOST_IP and generate real secrets
 docker compose up -d
 ```
@@ -131,8 +131,8 @@ Enrichment sources: VirusTotal, AbuseIPDB, AlienVault OTX.
 
 ## Authors
 
-Mohsen Taher Iseidyah · Altahir Hassan Altahir Salim
-Supervisor: Salwa Abdulnabi — Sabha University
+Altahir Hassan Altahir Salim · Mohsen Taher Iseidyah
+· Supervisor: Salwa Abdulnabi — Sabha University
 
 ## License
 
